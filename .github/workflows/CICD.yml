@@ -1,9 +1,17 @@
 name: CI_CD Pipeline
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verrify-production
+  cancel-in-progress: false
 
 env:
   IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
@@ -23,6 +31,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Test deployment automation
+        run: node --test scripts/*.test.mjs
 
       - name: Build check
         run: npm run build
@@ -57,132 +68,34 @@ jobs:
 
   deploy:
     needs: build-push
-    runs-on: [VERRIFY]
-    concurrency:
-      group: verrify-production
-      cancel-in-progress: false
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - name: Checkout Code
         uses: actions/checkout@v5
 
-      - name: Login to Docker Hub
-        uses: docker/login-action@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          node-version: '22'
 
-      - name: Ensure host directories
-        run: mkdir -p /home/verrify/logs
-
-      - name: Create .env file
+      - name: Check release is still the master head
         env:
-          GOOGLE_PRIVATE_KEY: ${{ secrets.GOOGLE_PRIVATE_KEY }}
-          RABBITMQ_USERNAME: ${{ secrets.RABBITMQ_USERNAME }}
-          RABBITMQ_PASSWORD: ${{ secrets.RABBITMQ_PASSWORD }}
+          RELEASE_SHA: ${{ github.sha }}
         run: |
-          urlencode() {
-            local input="$1"
-            local encoded=""
-            local pos char escaped
+          current_head=$(git ls-remote origin refs/heads/master | cut -f1)
+          if [ "$current_head" != "$RELEASE_SHA" ]; then
+            echo 'This release has been superseded. Deploy the latest master run.'
+            exit 1
+          fi
 
-            for ((pos = 0; pos < ${#input}; pos++)); do
-              char="${input:$pos:1}"
-              case "$char" in
-                [a-zA-Z0-9.~_-])
-                  escaped="$char"
-                  ;;
-                *)
-                  printf -v escaped '%%%02X' "'$char"
-                  ;;
-              esac
-              encoded+="$escaped"
-            done
-
-            printf '%s' "$encoded"
-          }
-
-          google_private_key="${GOOGLE_PRIVATE_KEY//$'\n'/\\n}"
-          rabbitmq_uri="amqp://$(urlencode "$RABBITMQ_USERNAME"):$(urlencode "$RABBITMQ_PASSWORD")@rabbitmq:5672"
-
-          cat > .env <<'EOF'
-          DOCKERHUB_IMAGE=${{ vars.DOCKERHUB_IMAGE }}
-          GITHUB_SHA=${{ github.sha }}
-
-          PORT=3000
-          APP_PROFILE=${{ vars.APP_PROFILE }}
-          NODE_ENV=${{ vars.NODE_ENV }}
-          FRONTEND_HOST=${{ vars.FRONTEND_HOST }}
-          ORIGIN=${{ vars.ORIGIN }}
-
-          DB_HOST=postgres
-          DB_PORT=${{ vars.DB_PORT }}
-          DB_USERNAME=${{ secrets.DB_USERNAME }}
-          DB_PASSWORD=${{ secrets.DB_PASSWORD }}
-          DB_NAME=${{ vars.DB_NAME }}
-          DB_TYPE=${{ vars.DB_TYPE }}
-          DB_SSL=${{ vars.DB_SSL }}
-
-          RABBITMQ_USERNAME=${{ secrets.RABBITMQ_USERNAME }}
-          RABBITMQ_PASSWORD=${{ secrets.RABBITMQ_PASSWORD }}
-
-          EMAIL_PROVIDER=${{ vars.EMAIL_PROVIDER }}
-          EMAIL_RESEND_API_KEY=${{ secrets.EMAIL_RESEND_API_KEY }}
-          EMAIL_USERNAME=${{ secrets.EMAIL_USERNAME }}
-          EMAIL_PASSWORD=${{ secrets.EMAIL_PASSWORD }}
-          EMAIL_HOST=${{ vars.EMAIL_HOST }}
-          EMAIL_PORT=${{ vars.EMAIL_PORT }}
-          EMAIL_REQUIRE_TLS=${{ vars.EMAIL_REQUIRE_TLS || 'true' }}
-          EMAIL_SENDER=${{ vars.EMAIL_SENDER }}
-          ADMIN_EMAIL=${{ vars.ADMIN_EMAIL }}
-
-          JWT_SECRET=${{ secrets.JWT_SECRET }}
-          JWT_EXPIRE=${{ vars.JWT_EXPIRE }}
-          REFRESH_EXPIRE=${{ vars.REFRESH_EXPIRE }}
-          VERIFICATION_EXPIRE=${{ vars.VERIFICATION_EXPIRE }}
-
-          LOG_FILE_PATH=${{ vars.LOG_FILE_PATH }}
-
-          R2_ACCOUNT_ID=${{ vars.R2_ACCOUNT_ID }}
-          R2_ACCESS_KEY_ID=${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY=${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_PUBLIC_BUCKET=${{ vars.R2_PUBLIC_BUCKET }}
-          R2_PRIVATE_BUCKET=${{ vars.R2_PRIVATE_BUCKET }}
-          R2_PUBLIC_BASE_URL=${{ vars.R2_PUBLIC_BASE_URL }}
-          R2_PRESIGNED_URL_TTL_SECONDS=${{ vars.R2_PRESIGNED_URL_TTL_SECONDS }}
-
-          GOOGLE_CLIENT_EMAIL=${{ secrets.GOOGLE_CLIENT_EMAIL }}
-          GOOGLE_SHEET_ID=${{ secrets.GOOGLE_SHEET_ID }}
-          GOOGLE_SHEET_NAME=${{ secrets.GOOGLE_SHEET_NAME }}
-
-          PAYSTACK_PUBLIC_KEY=${{ secrets.PAYSTACK_PUBLIC_KEY }}
-          PAYSTACK_SECRET_KEY=${{ secrets.PAYSTACK_SECRET_KEY }}
-          PAYSTACK_DOMAIN=live
-          PAYSTACK_TIMEOUT_MS=10000
-          EOF
-          printf '%s\n' "GOOGLE_PRIVATE_KEY=${google_private_key}" >> .env
-          printf '%s\n' "RABBITMQ_URI=${rabbitmq_uri}" >> .env
-          chmod 600 .env
-
-      - name: Pull application image
-        run: docker pull "${{ vars.DOCKERHUB_IMAGE }}:${{ github.sha }}"
-
-      - name: Start platform dependencies
-        run: docker compose -f docker-compose.production.yaml --env-file .env up -d --wait postgres rabbitmq
-
-      - name: Run database migrations
-        run: |
-          docker run --rm \
-            --env-file .env \
-            --network verrify_net \
-            "${{ vars.DOCKERHUB_IMAGE }}:${{ github.sha }}" \
-            npm run typeorm:migration-run:prod
-
-      - name: Deploy application stack
-        run: docker compose -f docker-compose.production.yaml --env-file .env up -d
-
-      - name: Clean old Docker images
-        run: docker image prune -a -f --filter "until=24h"
-
-      - name: Clean up .env
-        if: always()
-        run: rm -f .env
+      - name: Deploy through Dokploy and verify health
+        env:
+          DOKPLOY_URL: ${{ vars.DOKPLOY_URL }}
+          DOKPLOY_COMPOSE_ID: ${{ vars.DOKPLOY_COMPOSE_ID }}
+          DOKPLOY_APP_NAME: ${{ vars.DOKPLOY_APP_NAME }}
+          DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
+          DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
+          PRODUCTION_HEALTH_URL: ${{ vars.PRODUCTION_HEALTH_URL }}
+        run: node scripts/deploy-dokploy.mjs

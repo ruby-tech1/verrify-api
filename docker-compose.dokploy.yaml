@@ -1,0 +1,150 @@
+# CI replaces the release placeholders before uploading this Raw Compose file.
+services:
+  app:
+    image: __APP_IMAGE__
+    pull_policy: always
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: '3000'
+      APP_PROFILE: prod
+      DB_HOST: postgres
+      DB_PORT: '5432'
+      DB_TYPE: postgres
+      DB_USERNAME: ${DB_USERNAME:?Set DB_USERNAME in Dokploy}
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in Dokploy}
+      DB_NAME: ${DB_NAME:?Set DB_NAME in Dokploy}
+      DB_SSL: ${DB_SSL:-false}
+      LOG_FILE_PATH: /logs
+      FRONTEND_HOST: ${FRONTEND_HOST:?Set FRONTEND_HOST in Dokploy}
+      ORIGIN: ${ORIGIN:?Set ORIGIN in Dokploy}
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:?Set EMAIL_PROVIDER in Dokploy}
+      EMAIL_SENDER: ${EMAIL_SENDER:?Set EMAIL_SENDER in Dokploy}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:?Set ADMIN_EMAIL in Dokploy}
+      RABBITMQ_URI: ${RABBITMQ_URI:?Set RABBITMQ_URI in Dokploy}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in Dokploy}
+      JWT_EXPIRE: ${JWT_EXPIRE:?Set JWT_EXPIRE in Dokploy}
+      REFRESH_EXPIRE: ${REFRESH_EXPIRE:?Set REFRESH_EXPIRE in Dokploy}
+      VERIFICATION_EXPIRE: ${VERIFICATION_EXPIRE:?Set VERIFICATION_EXPIRE in Dokploy}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:?Set R2_ACCOUNT_ID in Dokploy}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:?Set R2_ACCESS_KEY_ID in Dokploy}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:?Set R2_SECRET_ACCESS_KEY in Dokploy}
+      R2_PUBLIC_BUCKET: ${R2_PUBLIC_BUCKET:?Set R2_PUBLIC_BUCKET in Dokploy}
+      R2_PRIVATE_BUCKET: ${R2_PRIVATE_BUCKET:?Set R2_PRIVATE_BUCKET in Dokploy}
+      R2_PUBLIC_BASE_URL: ${R2_PUBLIC_BASE_URL:?Set R2_PUBLIC_BASE_URL in Dokploy}
+      R2_PRESIGNED_URL_TTL_SECONDS: ${R2_PRESIGNED_URL_TTL_SECONDS:?Set R2_PRESIGNED_URL_TTL_SECONDS in Dokploy}
+      GOOGLE_CLIENT_EMAIL: ${GOOGLE_CLIENT_EMAIL:?Set GOOGLE_CLIENT_EMAIL in Dokploy}
+      GOOGLE_PRIVATE_KEY: ${GOOGLE_PRIVATE_KEY:?Set GOOGLE_PRIVATE_KEY in Dokploy}
+      GOOGLE_SHEET_ID: ${GOOGLE_SHEET_ID:?Set GOOGLE_SHEET_ID in Dokploy}
+      GOOGLE_SHEET_NAME: ${GOOGLE_SHEET_NAME:?Set GOOGLE_SHEET_NAME in Dokploy}
+      PAYSTACK_PUBLIC_KEY: ${PAYSTACK_PUBLIC_KEY:?Set PAYSTACK_PUBLIC_KEY in Dokploy}
+      PAYSTACK_SECRET_KEY: ${PAYSTACK_SECRET_KEY:?Set PAYSTACK_SECRET_KEY in Dokploy}
+      EMAIL_RESEND_API_KEY: ${EMAIL_RESEND_API_KEY:-}
+      EMAIL_USERNAME: ${EMAIL_USERNAME:-}
+      EMAIL_PASSWORD: ${EMAIL_PASSWORD:-}
+      EMAIL_HOST: ${EMAIL_HOST:-}
+      EMAIL_PORT: ${EMAIL_PORT:-587}
+      EMAIL_REQUIRE_TLS: ${EMAIL_REQUIRE_TLS:-true}
+      PAYSTACK_DOMAIN: ${PAYSTACK_DOMAIN:-live}
+      PAYSTACK_TIMEOUT_MS: ${PAYSTACK_TIMEOUT_MS:-10000}
+    ports:
+      - '127.0.0.1:3000:3000'
+    volumes:
+      - app_logs:/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - backend
+      - dokploy-network
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'wget -q --spider http://localhost:3000/api/v1/health || exit 1',
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+
+  migrate:
+    image: __APP_IMAGE__
+    pull_policy: always
+    restart: 'no'
+    command: ['npm', 'run', 'typeorm:migration-run:prod']
+    # Recreate this one-shot service even when retrying the same commit.
+    labels:
+      io.verrify.release: '__RELEASE__'
+    healthcheck:
+      disable: true
+    environment:
+      APP_PROFILE: prod
+      DB_HOST: postgres
+      DB_PORT: '5432'
+      DB_TYPE: postgres
+      DB_USERNAME: ${DB_USERNAME:?Set DB_USERNAME in Dokploy}
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in Dokploy}
+      DB_NAME: ${DB_NAME:?Set DB_NAME in Dokploy}
+      DB_SSL: ${DB_SSL:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - backend
+
+  postgres:
+    image: verrify-migration/postgres:initial
+    pull_policy: never
+    restart: unless-stopped
+    stop_grace_period: 120s
+    environment:
+      POSTGRES_USER: ${DB_USERNAME:?Set DB_USERNAME in Dokploy}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in Dokploy}
+      POSTGRES_DB: ${DB_NAME:?Set DB_NAME in Dokploy}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    networks:
+      - backend
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: verrify-migration/rabbitmq:initial
+    pull_policy: never
+    hostname: verrify-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USERNAME:?Set RABBITMQ_USERNAME in Dokploy}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD in Dokploy}
+    restart: unless-stopped
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - backend
+    healthcheck:
+      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'check_port_connectivity']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  backend:
+    driver: bridge
+  dokploy-network:
+    external: true
+
+volumes:
+  postgres_data:
+    external: true
+    name: verrify-api_postgres_data
+  app_logs:
+    external: true
+    name: verrify-dokploy-logs
+  rabbitmq_data:
